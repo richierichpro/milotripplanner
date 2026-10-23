@@ -335,3 +335,183 @@ ${rows}
 ${proof("Google Hotels")}`;
   return page(body, { title: "Pick your stay" });
 }
+
+// ---------- Day ----------
+
+export type DayStop = {
+  time: string;
+  name: string;
+  category?: string;
+  rating?: number;
+  reviews?: number;
+  price?: string;
+  note?: string;
+  photo?: string;
+  proof: string;
+  lat?: number;
+  lng?: number;
+  /** "≈ 2 km, short ride" or "18 min by scooter" before this stop. */
+  hop?: string;
+  kind?: "stop" | "logistics";
+};
+
+export type DayData = { index: number; date: string; title: string; stops: DayStop[]; leaveBy?: string; travel?: string; hotel?: { lat: number; lng: number; name: string } };
+
+function stopCard(s: DayStop, n: number, color: string): string {
+  return `${s.hop ? `<p class="muted" style="font-size:19px;padding:2px 0 8px 92px">↓ ${esc(s.hop)}</p>` : ""}
+<div class="card" style="display:flex;gap:18px;padding:18px;margin-bottom:12px">
+  <div style="width:76px;display:flex;flex-direction:column;align-items:center;gap:8px">
+    <span style="font-size:23px;font-weight:600">${esc(s.time)}</span>
+    <span style="display:grid;place-items:center;width:38px;height:38px;border-radius:50%;border:3px solid #fff;background:${color};color:#fff;font-weight:700;font-size:19px;box-shadow:0 1px 4px rgba(0,0,0,.3)">${n}</span>
+  </div>
+  ${photoBox(s.photo, `width:150px;height:150px;border-radius:${radius.xl}`)}
+  <div style="flex:1;min-width:0">
+    <p style="font-size:27px;font-weight:600;line-height:1.2">${esc(s.name)}</p>
+    <p class="muted" style="font-size:21px;margin-top:4px;display:flex;gap:12px;flex-wrap:wrap">${s.category ? `<span>${esc(s.category)}</span>` : ""}${ratingHtml(s.rating, s.reviews)}${s.price ? `<span>${esc(s.price)}</span>` : ""}</p>
+    ${s.note ? `<p style="font-size:21px;margin-top:6px;color:#3b4747"><span class="teal">Milo's note:</span> ${esc(s.note)}</p>` : ""}
+    ${proof(s.proof)}
+  </div>
+</div>`;
+}
+
+/** Leaflet with OpenStreetMap tiles: numbered day-coloured pins, the route, and the hotel. Flags __mapFailed if tiles don't load. */
+function dayMapScript(markers: { lat: number; lng: number; n: number }[], hotel: DayData["hotel"], color: string): string {
+  return `mapDone=new Promise(function(done){
+  try{
+    var m=L.map("map",{zoomControl:false,attributionControl:true,fadeAnimation:false,zoomAnimation:false});
+    var pts=${JSON.stringify(markers)}, hotel=${JSON.stringify(hotel ?? null)};
+    var tiles=L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:17,attribution:"© OpenStreetMap contributors"}).addTo(m);
+    var all=pts.map(function(p){return [p.lat,p.lng]});
+    if(hotel){all.push([hotel.lat,hotel.lng]);L.marker([hotel.lat,hotel.lng],{icon:L.divIcon({className:"",html:'<div class="pin-hotel">🏨</div>',iconSize:[44,44],iconAnchor:[22,22]})}).addTo(m)}
+    L.polyline(pts.map(function(p){return [p.lat,p.lng]}),{color:"${color}",weight:5,opacity:.85}).addTo(m);
+    pts.forEach(function(p){L.marker([p.lat,p.lng],{icon:L.divIcon({className:"",html:'<div class="pin" style="background:${color}">'+p.n+'</div>',iconSize:[36,36],iconAnchor:[18,18]})}).addTo(m)});
+    m.fitBounds(L.latLngBounds(all),{padding:[48,48],maxZoom:14});
+    var t=setTimeout(function(){window.__mapFailed=true;done(false)},7000);
+    tiles.on("load",function(){clearTimeout(t);done(true)});
+    tiles.on("tileerror",function(){window.__mapFailed=true});
+  }catch(e){window.__mapFailed=true;done(false)}
+});`;
+}
+
+export function dayCard(d: DayData, opts: { withMap?: boolean } = {}): string {
+  const color = DAY_COLORS[d.index % DAY_COLORS.length];
+  const mapped = d.stops.filter((s) => s.kind !== "logistics" && s.lat !== undefined && s.lng !== undefined);
+  const withMap = (opts.withMap ?? true) && mapped.length > 0;
+  let n = 0;
+  const stops = d.stops
+    .map((s) =>
+      s.kind === "logistics"
+        ? `<div style="display:flex;gap:16px;align-items:center;padding:12px 4px;font-size:22px"><span style="width:76px;font-weight:600">${esc(s.time)}</span><span class="muted">${esc(s.name)}</span></div>`
+        : stopCard(s, ++n, color),
+    )
+    .join("");
+  const subline = [d.leaveBy ? `Leave hotel by <b style="color:${colors.ink}">${esc(d.leaveBy)}</b>` : "", d.travel ? `🚗 ${esc(d.travel)} travel today` : ""].filter(Boolean).join(" · ");
+
+  const body = `
+<div style="display:flex;align-items:center;gap:14px">
+  <span style="width:20px;height:20px;border-radius:50%;background:${color}"></span>
+  <p class="eyebrow" style="color:${color}">Day ${d.index + 1} · ${esc(d.date)}</p>
+</div>
+<h1 class="display" style="font-size:50px;line-height:1.1;margin:6px 0 10px">${esc(d.title)}</h1>
+<p class="muted" style="font-size:22px;margin-bottom:20px">${subline}</p>
+${withMap ? `<div id="map" style="height:430px;border-radius:${radius["2xl"]};border:2px solid ${colors.line};margin-bottom:22px;overflow:hidden"></div>` : ""}
+${stops || `<p class="card muted" style="padding:22px;font-size:22px;border-style:dashed">A free day: nothing planned.</p>`}`;
+  const css = `.pin{display:grid;place-items:center;width:36px;height:36px;border-radius:50%;border:3px solid #fff;color:#fff;font:700 17px Hind,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.35)}
+.pin-hotel{display:grid;place-items:center;width:44px;height:44px;border-radius:12px;background:#fff;border:3px solid ${colors.marigold};font-size:22px;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.leaflet-container{background:${colors.sandDeep};font-family:Hind,sans-serif}`;
+  const markers = mapped.map((s, i) => ({ lat: s.lat!, lng: s.lng!, n: i + 1 }));
+  return page(body, { title: `Day ${d.index + 1}`, map: withMap ? dayMapScript(markers, d.hotel, color) : undefined, extraCss: css });
+}
+
+// ---------- Boarding pass ----------
+
+export type PassCheck = { ok: boolean; waived?: string; text: string };
+export type PassData = {
+  person: string;
+  index: number;
+  destination: string;
+  dates: string;
+  out?: { from: string; to: string; depart: string; arrive: string; date: string; numbers: string; airline: string };
+  back?: { from: string; to: string; depart: string; date: string; numbers: string };
+  hotel?: string;
+  total: number;
+  checks: PassCheck[];
+};
+
+function passCheck(c: PassCheck): string {
+  const mark = c.waived ? "⚠" : c.ok ? "✓" : "✗";
+  const color = c.waived ? colors.coral : c.ok ? colors.ok : colors.coral;
+  return `<p style="font-size:23px;line-height:1.4;margin-top:8px;display:flex;gap:10px"><span style="color:${color};font-weight:700">${mark}</span><span>${esc(c.text)}${c.waived ? ` <span style="color:${colors.coral}">(you agreed: ${esc(c.waived)})</span>` : ""}</span></p>`;
+}
+
+export function boardingPassCard(p: PassData): string {
+  const accent = AVATAR_COLORS[p.index % AVATAR_COLORS.length];
+  const o = p.out;
+  const route = o
+    ? `<div style="display:flex;align-items:center;justify-content:space-between;margin-top:24px">
+      <div><p class="display" style="font-size:96px;line-height:1">${esc(o.from)}</p><p style="font-size:26px;font-weight:600;font-family:monospace">${esc(o.depart)}</p></div>
+      <div style="flex:1;text-align:center;color:${colors.muted};font-size:22px">
+        <div style="border-top:3px dashed ${colors.line};margin:0 24px;position:relative;top:22px"></div>
+        <span style="position:relative;background:#fff;padding:0 12px;font-size:40px">✈️</span>
+        <p style="margin-top:4px">${esc(o.airline)} · ${esc(o.numbers)}</p>
+      </div>
+      <div style="text-align:right"><p class="display" style="font-size:96px;line-height:1">${esc(o.to)}</p><p style="font-size:26px;font-weight:600;font-family:monospace">${esc(o.arrive)}</p></div>
+    </div>
+    <p class="muted" style="font-size:22px;margin-top:10px">${esc(o.date)}${p.back ? ` · home ${esc(p.back.date)}, ${esc(p.back.from)} ${esc(p.back.depart)} → ${esc(p.back.to)} (${esc(p.back.numbers)})` : ""}</p>`
+    : `<p class="muted" style="font-size:24px;margin-top:20px">Flights: couldn't check this</p>`;
+
+  const body = `
+<div style="border-radius:24px;overflow:hidden;background:#fff;border:2px solid ${colors.line};box-shadow:0 4px 18px rgba(29,43,44,.08)">
+  <div style="background:${colors.teal};color:#fff;padding:22px 32px;display:flex;justify-content:space-between;align-items:center">
+    <span class="display" style="font-size:34px">Milo</span>
+    <span style="font-size:20px;letter-spacing:.24em">BOARDING PASS</span>
+  </div>
+  <div style="padding:30px 36px 26px">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div><p class="muted" style="font-size:18px;letter-spacing:.14em">PASSENGER</p><p class="display" style="font-size:44px;color:${accent}">${esc(p.person)}</p></div>
+      <div style="text-align:right"><p class="muted" style="font-size:18px;letter-spacing:.14em">TRIP</p><p style="font-size:26px;font-weight:600">${esc(p.destination)} · ${esc(p.dates)}</p></div>
+    </div>
+    ${route}
+  </div>
+  <div style="position:relative;height:0;border-top:3px dashed ${colors.line};margin:0 30px">
+    <span style="position:absolute;left:-52px;top:-22px;width:44px;height:44px;border-radius:50%;background:${colors.sand}"></span>
+    <span style="position:absolute;right:-52px;top:-22px;width:44px;height:44px;border-radius:50%;background:${colors.sand}"></span>
+  </div>
+  <div style="padding:26px 36px 30px;background:${colors.sand}">
+    <div style="display:flex;justify-content:space-between;align-items:baseline">
+      <p class="eyebrow" style="color:${colors.ok}">Works for you</p>
+      <p style="font-size:26px;font-weight:700">${rupees(p.total)} <span class="muted" style="font-weight:400;font-size:20px">your share</span></p>
+    </div>
+    <div style="margin-top:12px">${p.checks.map(passCheck).join("")}</div>
+    ${p.hotel ? `<p class="muted" style="font-size:20px;margin-top:14px">🏨 ${esc(p.hotel)}</p>` : ""}
+  </div>
+</div>`;
+  return page(body, { title: `Pass · ${p.person}` });
+}
+
+// ---------- Cost split ----------
+
+export type CostRow = { person: string; flights: number; hotelShare: number; total: number; budget?: number };
+
+export function costSplitCard(rows: CostRow[], nights: number, rooms: number, extra?: string): string {
+  const avg = rows.reduce((s, r) => s + r.total, 0) / Math.max(1, rows.length);
+  const th = `style="padding:16px 22px;text-align:right;font-weight:500"`;
+  const td = `padding:16px 22px;text-align:right`;
+  const tableRows = rows
+    .map((r) => {
+      const over = r.budget !== undefined && r.total > r.budget;
+      return `<tr style="border-top:2px solid ${colors.line}"><td style="padding:16px 22px">${esc(r.person)}${r.budget ? ` <span class="muted" style="font-size:19px">cap ${rupees(r.budget)}</span>` : ""}</td><td style="${td}">${rupees(r.flights)}</td><td style="${td}">${rupees(r.hotelShare)}</td><td style="${td};font-weight:700;color:${over ? colors.coral : colors.ink}">${rupees(r.total)}</td></tr>`;
+    })
+    .join("");
+  const body = `
+<p class="eyebrow">💸 Cost split</p>
+<h1 class="display" style="font-size:48px;margin:6px 0 22px">What each person pays</h1>
+<div class="card">
+  <table style="width:100%;border-collapse:collapse;font-size:24px">
+    <thead style="background:rgba(243,234,219,.6);color:${colors.muted}"><tr><th style="padding:16px 22px;text-align:left;font-weight:500">Who</th><th ${th}>Flights</th><th ${th}>Hotel share</th><th ${th}>Total</th></tr></thead>
+    <tbody>${tableRows}</tbody>
+  </table>
+  <p class="muted" style="padding:14px 22px;font-size:19px;border-top:2px solid ${colors.line}">Hotel share = price per night × ${nights} nights × ${rooms} rooms ÷ ${rows.length} people. Average ${rupees(avg)}.${extra ? ` ${esc(extra)}` : ""}</p>
+</div>`;
+  return page(body, { title: "Cost split" });
+}
