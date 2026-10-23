@@ -1,0 +1,23 @@
+{
+  "name": "milotripplanner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Milo: the trip planner that lives in your group chat (Telegram bot).",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "bot": "tsx --env-file=.env.local src/bot/index.ts",
+    "simulate": "tsx --env-file-if-exists=.env.local scripts/simulate.ts",
+    "reality-check": "tsx --env-file-if-exists=.env.local scripts/reality-check.ts",
+    "record-demo": "tsx scripts/record-demo.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

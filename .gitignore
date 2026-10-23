@@ -1,0 +1,11 @@
+node_modules/
+.env.local
+.env*.local
+.DS_Store
+*.log
+coverage/
+
+# Runtime state and caches
+.data/
+.data-*/
+.cache/
