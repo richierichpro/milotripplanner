@@ -17,12 +17,14 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
+    "@types/suncalc": "^1.9.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
     "vitest": "^5.0.3"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.133.0"
+    "@anthropic-ai/sdk": "^0.133.0",
+    "suncalc": "^2.1.1"
   }
 }
