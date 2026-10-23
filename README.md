@@ -1,6 +1,6 @@
 # Milo
 
-**The trip planner that lives in your group chat.** Add Milo to the trip group, keep chatting, and it plans a trip that works for everyone, built from real Google results via SerpApi.
+**The trip planner that lives in your Telegram group chat.** Milo is a Telegram bot: add it to your trip group, keep chatting, and it plans a trip that works for everyone, built from real Google results via SerpApi.
 
 ## The problem
 
