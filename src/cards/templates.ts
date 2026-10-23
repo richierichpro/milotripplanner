@@ -160,3 +160,178 @@ export function decidedCard(question: string, winner: string, detail: string, re
 ${proof(reason)}`;
   return page(body, { title: "Decided" });
 }
+
+// ---------- Plan header ----------
+
+export type HeaderData = {
+  title: string;
+  destination: string;
+  dates: string;
+  perPerson: number;
+  summary: string;
+  squad: string[];
+  verified: { verified: number; total: number };
+  searches: number;
+};
+
+export function headerCard(h: HeaderData): string {
+  const allOk = h.verified.verified === h.verified.total;
+  const body = `
+<p class="eyebrow">${esc(h.destination)} · ${esc(h.dates)}</p>
+<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-top:6px">
+  <h1 class="display" style="font-size:56px;line-height:1.08;flex:1">${esc(h.title)}</h1>
+  <div style="text-align:right">
+    <p class="display" style="font-size:56px;color:${colors.teal};line-height:1">${rupees(h.perPerson)}</p>
+    <p class="muted" style="font-size:20px">per person, on average</p>
+  </div>
+</div>
+<p style="font-size:24px;line-height:1.45;margin-top:16px;color:#3b4747">${esc(h.summary)}</p>
+<div style="display:flex;align-items:center;gap:18px;margin-top:22px;flex-wrap:wrap">
+  <div style="display:flex">${h.squad.map((n, i) => `<span style="margin-left:${i ? -12 : 0}px">${avatar(n, i)}</span>`).join("")}</div>
+  <span class="pill" style="background:${allOk ? "#e6f2ec" : "#fbe9e4"};color:${allOk ? colors.ok : colors.coral};font-weight:600">✓ ${h.verified.verified}/${h.verified.total} verified with live Google data</span>
+  <span class="pill" style="background:${colors.white};border:2px solid ${colors.line}">${h.searches} searches</span>
+</div>`;
+  return page(body, { title: "Plan" });
+}
+
+// ---------- Flights and the arrival timeline ----------
+
+export type FlightLeg = { from: string; to: string; depart: string; arrive: string; nextDay: boolean; airline: string; logo?: string; duration: string; stops: string; price: number; numbers: string };
+export type FlightRow = { person: string; city: string; out?: FlightLeg; back?: FlightLeg; checked?: string };
+export type ArrivalDot = { person: string; time: string; minutes: number; airport: string };
+
+function legRow(l: FlightLeg | undefined, label: string): string {
+  if (!l) return `<p class="muted" style="font-size:22px">${label}: couldn't check this</p>`;
+  return `<div style="display:flex;align-items:center;gap:12px;font-size:23px;margin-top:6px">
+    <span class="muted" style="width:60px;font-size:18px;letter-spacing:.08em;text-transform:uppercase">${label}</span>
+    ${l.logo ? `<img src="${esc(l.logo)}" style="width:28px;height:28px;border-radius:6px">` : ""}
+    <span style="font-weight:600">${esc(l.from)} ${esc(l.depart)} → ${esc(l.to)} ${esc(l.arrive)}${l.nextDay ? `<sup style="color:${colors.coral}">+1</sup>` : ""}</span>
+    <span class="muted">· ${esc(l.duration)} · ${esc(l.stops)}</span>
+    <span style="margin-left:auto;font-weight:600">${rupees(l.price)}</span>
+  </div>`;
+}
+
+/** Arrival dots on a bar with the window highlighted; labels stack into rows so none overlap. */
+function arrivalTimeline(arrivals: ArrivalDot[], window: { headline: string; sub: string; warning?: string }): string {
+  const lo = Math.min(...arrivals.map((a) => a.minutes)) - 60;
+  const hi = Math.max(...arrivals.map((a) => a.minutes)) + 60;
+  const pct = (m: number) => ((m - lo) / Math.max(1, hi - lo)) * 100;
+  const LABEL = 24;
+  const rowEnds: number[] = [];
+  const labelRow: number[] = [];
+  for (const { p, i } of arrivals.map((a, i) => ({ p: pct(a.minutes), i })).sort((x, y) => x.p - y.p)) {
+    let r = rowEnds.findIndex((end) => p - LABEL / 2 >= end);
+    if (r < 0) r = rowEnds.push(0) - 1;
+    rowEnds[r] = p + LABEL / 2;
+    labelRow[i] = r;
+  }
+  const lines = Math.max(1, ...labelRow.map((r) => r + 1));
+  const first = Math.min(...arrivals.map((a) => a.minutes));
+  const last = Math.max(...arrivals.map((a) => a.minutes));
+  const dots = arrivals
+    .map((a) => `<div style="position:absolute;left:${pct(a.minutes)}%;top:-7px;width:28px;height:28px;margin-left:-14px;border-radius:50%;border:4px solid #fff;background:${colors.teal};box-shadow:0 1px 4px rgba(0,0,0,.25)"></div>`)
+    .join("");
+  const labels = arrivals
+    .map((a, i) => `<p style="position:absolute;white-space:nowrap;transform:translateX(-50%);left:${Math.min(88, Math.max(12, pct(a.minutes)))}%;top:${labelRow[i] * 30}px;font-size:20px"><b>${esc(a.person)}</b> ${esc(a.time)} <span class="muted">${esc(a.airport)}</span></p>`)
+    .join("");
+  return `<div class="card" style="padding:24px 28px;margin-bottom:22px">
+    <p style="font-size:26px;font-weight:600">${esc(window.headline)} <span class="muted" style="font-weight:400">· ${esc(window.sub)}</span></p>
+    ${window.warning ? `<p style="font-size:22px;font-weight:600;color:${colors.coral};margin-top:6px">⚠ ${esc(window.warning)}</p>` : ""}
+    <div style="position:relative;height:14px;border-radius:9999px;background:${colors.sandDeep};margin-top:30px">
+      <div style="position:absolute;top:0;bottom:0;left:${pct(first)}%;right:${100 - pct(last)}%;border-radius:9999px;background:rgba(240,162,2,.5)"></div>
+      ${dots}
+    </div>
+    <div style="position:relative;height:${lines * 30}px;margin-top:16px">${labels}</div>
+  </div>`;
+}
+
+export function flightsCard(destination: string, rows: FlightRow[], arrivals: ArrivalDot[], window?: { headline: string; sub: string; warning?: string }): string {
+  const people = rows
+    .map(
+      (r, i) => `
+  <div style="padding:20px 26px;${rowBorder(i)}">
+    <p style="font-size:24px"><b>${esc(r.person)}</b> <span class="muted">· ${esc(r.city)} → ${esc(destination)}</span></p>
+    ${legRow(r.out, "Out")}
+    ${legRow(r.back, "Back")}
+    ${r.out ? proof(`Google Flights · ${r.out.numbers}${r.checked ? ` · checked ${r.checked}` : ""}`) : ""}
+  </div>`,
+    )
+    .join("");
+  const body = `
+<p class="eyebrow">✈️ Flights</p>
+<h1 class="display" style="font-size:48px;margin:6px 0 22px">Everyone to ${esc(destination)}</h1>
+${arrivals.length > 1 && window ? arrivalTimeline(arrivals, window) : ""}
+<div class="card">${people}
+</div>`;
+  return page(body, { title: "Flights" });
+}
+
+// ---------- Hotel ----------
+
+export type HotelData = {
+  name: string;
+  photo?: string;
+  stars?: number;
+  rating?: number;
+  reviews?: number;
+  perNight?: number;
+  rooms: number;
+  nights: number;
+  distanceKm?: number;
+  checkIn?: string;
+  checkOut?: string;
+  amenities: string[];
+  checked?: string;
+};
+
+const ratingHtml = (rating?: number, reviews?: number) =>
+  rating ? `<span><span style="color:${colors.marigold}">★</span> ${rating.toFixed(1)}${reviews ? ` <span class="muted">(${inr.format(reviews)})</span>` : ""}</span>` : "";
+const starsHtml = (stars?: number) => (stars ? `<span class="muted">${"★".repeat(stars)} hotel</span>` : "");
+const photoBox = (src: string | undefined, style: string) => (src ? `<img class="photo" src="${esc(src)}" style="${style}">` : `<div class="photo" style="${style}"></div>`);
+const plural = (n: number, word: string) => `${n} ${word}${n > 1 ? "s" : ""}`;
+
+export function hotelCard(h: HotelData): string {
+  const body = `
+<p class="eyebrow">🏨 Where you'll stay</p>
+<div class="card" style="display:flex;margin-top:18px">
+  ${photoBox(h.photo, "width:360px;min-height:300px")}
+  <div style="flex:1;min-width:0;padding:26px 28px">
+    <p class="display" style="font-size:38px;line-height:1.15">${esc(h.name)}</p>
+    <p style="font-size:23px;margin-top:8px;display:flex;gap:14px;flex-wrap:wrap">${starsHtml(h.stars)}${ratingHtml(h.rating, h.reviews)}</p>
+    <p style="font-size:24px;margin-top:10px"><b>${h.perNight ? rupees(h.perNight) : "–"}</b><span class="muted"> /night · ${plural(h.rooms, "room")} × ${h.nights} nights</span></p>
+    ${h.distanceKm !== undefined ? `<p class="muted" style="font-size:22px;margin-top:8px">📍 ≈ ${h.distanceKm < 1 ? "<1" : Math.round(h.distanceKm)} km from most of your plan</p>` : ""}
+    ${h.checkIn || h.checkOut ? `<p class="muted" style="font-size:22px;margin-top:6px">Check-in ${esc(h.checkIn ?? "not listed")} · check-out ${esc(h.checkOut ?? "not listed")}</p>` : ""}
+    ${h.amenities.length ? `<p class="muted" style="font-size:20px;margin-top:8px">${esc(h.amenities.slice(0, 4).join(" · "))}</p>` : ""}
+    ${proof(`Google Hotels${h.checked ? ` · checked ${h.checked}` : ""}`)}
+  </div>
+</div>`;
+  return page(body, { title: "Hotel" });
+}
+
+// ---------- Hotel choice: three stays on one card ----------
+
+export type HotelChoice = { number: number; tag: string; name: string; photo?: string; rating?: number; reviews?: number; stars?: number; perNight?: number; each: number };
+
+export function hotelChoiceCard(options: HotelChoice[], nights: number, rooms: number): string {
+  const rows = options
+    .map(
+      (h) => `
+<div class="card" style="display:flex;margin-top:18px">
+  ${photoBox(h.photo, "width:260px;min-height:210px")}
+  <div style="flex:1;min-width:0;padding:20px 26px">
+    <p style="font-size:22px;letter-spacing:.08em;text-transform:uppercase" class="muted"><b style="color:${colors.teal}">${h.number}</b> · ${esc(h.tag)}</p>
+    <p class="display" style="font-size:32px;line-height:1.15;margin-top:4px">${esc(h.name)}</p>
+    <p style="font-size:22px;margin-top:6px;display:flex;gap:14px;flex-wrap:wrap">${starsHtml(h.stars)}${ratingHtml(h.rating, h.reviews)}</p>
+    <p style="font-size:23px;margin-top:8px"><b>${h.perNight ? rupees(h.perNight) : "–"}</b><span class="muted"> /night</span> · <b>≈ ${rupees(h.each)}</b><span class="muted"> each, all in</span></p>
+  </div>
+</div>`,
+    )
+    .join("");
+  const body = `
+<p class="eyebrow">🏨 Pick your stay</p>
+<h1 class="display" style="font-size:46px;line-height:1.1;margin:6px 0 4px">Three stays that fit everyone</h1>
+<p class="muted" style="font-size:22px">${plural(rooms, "room")} × ${nights} nights · "each" = flights + your share of the room</p>
+${rows}
+${proof("Google Hotels")}`;
+  return page(body, { title: "Pick your stay" });
+}
