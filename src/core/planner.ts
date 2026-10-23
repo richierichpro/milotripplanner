@@ -1,11 +1,14 @@
 import * as SunCalc from "suncalc";
-import type { ToolDef } from "./claude.js";
-import { suitsDiet, type ConstraintCheck } from "./constraints.js";
-import type { LatLng } from "./directions.js";
+import { airportCoords } from "./airports.js";
+import { isOpenAt } from "./checks.js";
+import { callTool, type ToolDef } from "./claude.js";
+import { checkPerson, suitsDiet, type ConstraintCheck } from "./constraints.js";
+import { DirectionsBudget, getTravelTime, type LatLng } from "./directions.js";
 import type { CandidatePool, Trip } from "./gather.js";
+import { haversineKm, median } from "./geo.js";
 import type { Solution } from "./solve.js";
-import { fame, placeKind, theme } from "./themes.js";
-import type { CallLogEntry, Day, Drop, Event, Place, SquadMember } from "./types.js";
+import { fame, matchesWish, placeKind, theme } from "./themes.js";
+import type { CallLogEntry, Day, Drop, Event, Logistics, Place, SquadMember, Stop } from "./types.js";
 
 // Claude arranges real candidates by id; code checks everything it returns and
 // adds the logistics (transfers, leave-by times, hop times, sunset).
@@ -217,4 +220,248 @@ export function noteProblem(note: string, item: Place | Event, allowNames: strin
   }
   if (!("name" in item) && /tribute|candlelight|cover/i.test(item.title) && /\b(live|performs?|performing|playing|plays)\b/i.test(note)) return "a tribute concert isn't the artist performing";
   return undefined;
+}
+
+// ---------- Draft checks ----------
+
+type Lookup = Map<string, Place | Event>;
+const isPlace = (x: Place | Event | undefined): x is Place => !!x && "name" in x;
+
+/** Everything wrong with a draft, as instructions Claude can act on. */
+function draftProblems(d: Draft, pool: CandidatePool, trip: Trip, squad: SquadMember[], lookup: Lookup): string[] {
+  const out: string[] = [];
+  const isFull = (i: number) => i > 0 && i < d.days.length - 1;
+
+  const unknown = d.days.flatMap((day) => day.stops.filter((s) => !lookup.has(s.id)).map((s) => s.id));
+  if (unknown.length) out.push(`These ids aren't in the list: ${unknown.join(", ")}.`);
+
+  if (needsVeg(squad))
+    d.days.forEach((day, i) => {
+      if (isFull(i) && !day.stops.some((s) => { const p = lookup.get(s.id); return isPlace(p) && suitsDiet(p, "veg"); })) out.push(`${day.date} needs a [veg] meal stop.`);
+    });
+
+  // Every must-do the searches found goes in, named or not ("bungee jumping" → a bungee centre).
+  for (const p of squad)
+    for (const c of p.constraints) {
+      if (c.kind !== "must_do" || c.waived) continue;
+      const options = pool.places.flatMap((x, i) => (matchesWish(x, c.what) ? [alias.place(i)] : []));
+      const inPlan = d.days.some((day) => day.stops.some((s) => { const x = lookup.get(s.id); return isPlace(x) && matchesWish(x, c.what); }));
+      if (options.length && !inPlan) out.push(`Include ${p.name}'s must-do "${c.what}": use one of ${options.slice(0, 3).join(", ")}.`);
+    }
+
+  const doAvailable = pool.places.filter((p) => placeKind(p) === "do").length;
+  d.days.forEach((day, i) => {
+    const dos = day.stops.filter((s) => { const p = lookup.get(s.id); return !!p && ("title" in p || placeKind(p) === "do"); }).length;
+    if (isFull(i) && doAvailable >= MIN_DO_FULL_DAY * (d.days.length - 2) && dos < MIN_DO_FULL_DAY)
+      out.push(`${day.date} has only ${dos} [do] stop${dos === 1 ? "" : "s"}; add sights or activities (at least ${MIN_DO_FULL_DAY}).`);
+  });
+
+  // Variety: one theme per day, at most twice a trip, few activity shops unless asked for.
+  const wants = [...trip.interests, ...squad.flatMap((p) => p.constraints.flatMap((c) => (c.kind === "must_do" || c.kind === "vibe" ? [c.what] : [])))];
+  const askedActivities = wants.filter((w) => theme({ name: w }) === "activity").length;
+  const themeCount = new Map<string, number>();
+  for (const day of d.days) {
+    const seen = new Set<string>();
+    for (const s of day.stops) {
+      const p = lookup.get(s.id);
+      if (!isPlace(p) || placeKind(p) !== "do") continue;
+      const th = theme(p);
+      if (th !== "sight" && seen.has(th)) out.push(`${day.date} has two ${th} stops; swap one for a different theme.`);
+      seen.add(th);
+      themeCount.set(th, (themeCount.get(th) ?? 0) + 1);
+    }
+  }
+  for (const [th, n] of themeCount) {
+    const limit = th === "activity" ? MAX_ACTIVITIES + askedActivities : 2;
+    if (th !== "sight" && n > limit) out.push(`${n} ${th} stops in the trip; keep at most ${limit} and use other themes ([highlight]s and [gem]s) instead.`);
+  }
+
+  // One area per day.
+  for (const day of d.days) {
+    const pts = day.stops.map((s) => lookup.get(s.id)).filter((x): x is Place => !!x && "lat" in x);
+    let spread = 0;
+    for (const a of pts) for (const b of pts) spread = Math.max(spread, haversineKm(a, b));
+    if (spread > DAY_SPREAD_KM) out.push(`${day.date}: stops are up to ${Math.round(spread)} km apart; keep the day within one area.`);
+  }
+  return out;
+}
+
+// ---------- Plan ----------
+
+export async function planTrip(
+  pool: CandidatePool,
+  trip: Trip,
+  sol: Solution,
+  squad: SquadMember[],
+  opts: { log?: CallLogEntry[]; onProgress?: (text: string) => void } = {},
+): Promise<TripPlan> {
+  const log = opts.log ?? [];
+  const budget = new DirectionsBudget(12);
+  const dates = tripDates(trip);
+  const hotel = sol.hotel;
+
+  // Transfers first: they decide when day 1 can start and when the last day ends.
+  opts.onProgress?.("Checking airport transfer times…");
+  const arrivalAirports = [...new Set(sol.flights.map((f) => f.out?.to).filter((x): x is string => !!x))];
+  const departureAirports = [...new Set(sol.flights.map((f) => f.back?.from).filter((x): x is string => !!x))];
+  const transferIn: Record<string, number> = {};
+  const transferOut: Record<string, number> = {};
+  if (hotel) {
+    for (const code of arrivalAirports) {
+      const c = airportCoords(code);
+      const t = c && (await getTravelTime({ lat: c[0], lng: c[1] }, hotel, "driving", undefined, { budget, log }).catch(() => undefined));
+      if (t) transferIn[code] = t.minutes;
+    }
+    for (const code of departureAirports) {
+      const c = airportCoords(code);
+      const t = c && (await getTravelTime(hotel, { lat: c[0], lng: c[1] }, "driving", undefined, { budget, log }).catch(() => undefined));
+      if (t) transferOut[code] = t.minutes;
+    }
+  }
+  const maxIn = Math.max(0, ...Object.values(transferIn));
+  const maxOut = Math.max(0, ...Object.values(transferOut));
+
+  opts.onProgress?.("Asking Claude to arrange the days…");
+  const base = buildPrompt(pool, trip, sol, squad, maxIn || undefined, maxOut || undefined);
+  let draft = await callTool<Draft>(SYSTEM, [{ role: "user", content: base }], SUBMIT, { maxTokens: 16_000 });
+  if (!Array.isArray(draft?.days)) throw new Error("The plan came back without days.");
+
+  // Up to two rounds of fixes: variety and area rules often need a second pass.
+  opts.onProgress?.("Checking every item against search results…");
+  const lookup: Lookup = new Map<string, Place | Event>([...pool.places.map((p, i) => [alias.place(i), p] as const), ...pool.events.map((e, i) => [alias.event(i), e] as const)]);
+  for (let round = 0; round < 2; round++) {
+    const problems = draftProblems(draft, pool, trip, squad, lookup);
+    if (!problems.length) break;
+    const content = `${base}\n\nYour previous plan:\n${JSON.stringify(draft)}\n\nFix only these problems and resubmit the full plan:\n- ${problems.join("\n- ")}`;
+    const fixed = await callTool<Draft>(SYSTEM, [{ role: "user", content }], SUBMIT, { maxTokens: 16_000 }).catch(() => undefined);
+    // A broken fix keeps the last good draft; the checks below still drop anything that fails.
+    if (!Array.isArray(fixed?.days)) break;
+    draft = fixed;
+  }
+
+  // Build the days, dropping anything unknown, repeated or closed at that time.
+  const drops: Drop[] = [];
+  const removed: string[] = [];
+  const seen = new Set<string>();
+  const names = [trip.destination, ...squad.map((p) => p.name)];
+  const days: Day[] = dates.map((date) => {
+    const d = draft.days.find((x) => x.date === date);
+    const stops: Stop[] = [];
+    for (const s of d?.stops ?? []) {
+      const item = lookup.get(s.id);
+      if (!item) {
+        removed.push(s.id);
+        continue;
+      }
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      const time = /^\d{1,2}:\d{2}$/.test(s.time) ? s.time.padStart(5, "0") : "12:00";
+      if (!isPlace(item)) {
+        stops.push({ kind: "event", item, time, why: s.note.trim() });
+        continue;
+      }
+      const open = isOpenAt(item, date, time);
+      if (open === false) {
+        drops.push({ id: item.id, name: item.name, kind: "place", reason: `closed at ${time} on ${weekday(date)}` });
+        continue;
+      }
+      stops.push({ kind: "place", item, time, why: s.note.trim(), hoursNote: open === undefined ? "hours not listed" : undefined });
+    }
+    stops.sort((a, b) => a.time.localeCompare(b.time));
+    return { date, title: d?.title ?? "Free day", stops };
+  });
+
+  // Notes that fail the fact check get one rewrite; after that, no note.
+  const bad = days.flatMap((d) => d.stops.filter((s) => noteProblem(s.why, s.item, names)));
+  if (bad.length) {
+    const idOf = (s: Stop) => (s.kind === "place" ? alias.place(pool.places.indexOf(s.item)) : alias.event(pool.events.indexOf(s.item)));
+    const lines = bad.map((s) => {
+      const line = s.kind === "place" ? placeLine(s.item, pool.places.indexOf(s.item), dates, false) : eventLine(s.item, pool.events.indexOf(s.item));
+      return `${line}  ← old note: "${s.why}" (${noteProblem(s.why, s.item, names)})`;
+    });
+    try {
+      const r = await callTool<{ notes: { id: string; note: string }[] }>(SYSTEM, [{ role: "user", content: `Rewrite each note (max 15 words) using only facts in its own line:\n${lines.join("\n")}` }], RENOTE, { maxTokens: 1500 });
+      for (const s of bad) {
+        const fresh = r.notes.find((n) => n.id === idOf(s))?.note ?? "";
+        s.why = noteProblem(fresh, s.item, names) ? "" : fresh;
+      }
+    } catch {
+      for (const s of bad) s.why = "";
+    }
+  }
+
+  // Logistics: arrivals, check-in, hops between stops, leave-by, sunset, airport run.
+  opts.onProgress?.("Working out travel times between stops…");
+  const w = arrivalWindow(sol);
+  const scooters = squad.some((p) => p.constraints.some((c) => c.kind === "vibe" && /scooter|bike/i.test(c.what)));
+  for (const [i, day] of days.entries()) {
+    const logistics: Logistics[] = [];
+    if (i === 0 && hotel) {
+      for (const code of arrivalAirports) {
+        const who = sol.flights.filter((f) => f.out?.to === code);
+        const last = who.map((f) => f.out!.arriveTime).sort().at(-1)!;
+        logistics.push({ time: clock(last), label: `${who.map((f) => f.person).join(", ")} land at ${code}${transferIn[code] ? ` · ${transferIn[code]} min to the hotel (Google Maps)` : ""}`, at: "start" });
+      }
+      if (w.lastArrival && hotel.checkInTime) logistics.push({ time: hm(toMin(clock(w.lastArrival)) + maxIn), label: `At ${hotel.name} · Check-in from ${hotel.checkInTime}`, at: "start" });
+    }
+    if (i === days.length - 1 && w.firstDeparture) {
+      const leave = hm(toMin(clock(w.firstDeparture)) - AIRPORT_BUFFER_MIN - maxOut);
+      logistics.push({ time: leave, label: `Leave for the airport${maxOut ? ` (${maxOut} min drive, Google Maps)` : ""}${hotel?.checkOutTime ? ` · check-out by ${hotel.checkOutTime}` : ""}`, at: "end" });
+    }
+
+    let prev: LatLng | undefined = hotel;
+    let travel = 0;
+    for (const s of day.stops) {
+      if (s.kind !== "place") continue;
+      if (prev) {
+        const km = haversineKm(prev, s.item);
+        if (km > SHORT_HOP_KM) {
+          const mode = scooters ? "two_wheeler" : "driving";
+          const t = await getTravelTime(prev, s.item, mode, undefined, { budget, log }).catch(() => undefined);
+          if (t) {
+            s.hop = `${t.text} by ${mode === "two_wheeler" ? "scooter" : "car"} (Google Maps)`;
+            s.hopMinutes = t.minutes;
+          } else {
+            s.hop = `≈ ${Math.round(km)} km`;
+            s.hopMinutes = Math.round((km * 1.3 * 60) / 30);
+          }
+        } else {
+          s.hop = `≈ ${km < 1 ? "<1" : Math.round(km)} km, short ride`;
+          s.hopMinutes = Math.round((km * 1.3 * 60) / 25);
+        }
+        travel += s.hopMinutes ?? 0;
+      }
+      prev = s.item;
+    }
+    const firstPlace = day.stops.find((s) => s.kind === "place");
+    day.logistics = logistics;
+    day.travelMinutes = travel;
+    day.leaveBy = firstPlace && i > 0 ? hm(toMin(firstPlace.time) - (firstPlace.hopMinutes ?? 15)) : undefined;
+    day.sunset = sunsetAt(day.date, hotel ?? pool.places[0]);
+  }
+
+  // Verification: every picked flight, the hotel and every stop must be in the search results.
+  const stops = days.flatMap((d) => d.stops);
+  const allFlights = [...Object.values(pool.flightsOut).flat(), ...Object.values(pool.flightsBack).flat()];
+  const picked = sol.flights.flatMap((f) => [f.out, f.back]).filter((x) => !!x);
+  const total = picked.length + (hotel ? 1 : 0) + stops.length;
+  const verified =
+    picked.filter((f) => allFlights.some((x) => x.id === f!.id)).length +
+    (hotel && pool.hotels.some((h) => h.id === hotel.id) ? 1 : 0) +
+    stops.filter((s) => [...pool.places, ...pool.events].some((x) => x.id === s.item.id)).length;
+
+  const plan = { startDate: trip.startDate, endDate: trip.endDate, flights: sol.flights, costs: sol.costs, hotel, days };
+  return {
+    title: /\d/.test(draft.title) ? `${trip.destination} with the squad` : draft.title,
+    summary: draft.summary.replace(/\s+/g, " ").trim(),
+    trip,
+    solution: sol,
+    days,
+    hotelDistanceKm: hotel ? median(stops.filter((s) => s.kind === "place").map((s) => haversineKm(hotel, s.item as Place))) : undefined,
+    verification: { total, verified, removed },
+    drops: [...pool.drops, ...drops],
+    checks: Object.fromEntries(squad.map((p) => [p.id, checkPerson(plan, p)])),
+    receipts: [...pool.receipts, ...log],
+    createdAt: new Date().toISOString(),
+  };
 }
